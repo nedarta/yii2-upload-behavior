@@ -181,8 +181,8 @@ class UploadBehavior extends Behavior
 			elseif (isset($config['smartcrop'])) {
 				[$w, $h] = $config['smartcrop'];
 
-				if (class_exists('\nedarta\smartcropper\AutoCropper')) {
-					\nedarta\smartcropper\AutoCropper::cropAndSave($inputFile, $w, $h, $target);
+				if (class_exists('\nedarta\autocrop\AutoCropper')) {
+					\nedarta\autocrop\AutoCropper::cropAndSave($inputFile, $w, $h, $target);
 				} else {
 					Image::thumbnail($inputFile, $w, $h)
 						->save($target, ['quality' => $config['quality'] ?? 80]);
