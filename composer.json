@@ -1,0 +1,37 @@
+{
+  "name": "nedarta/yii2-upload-behavior",
+  "description": "Configurable Yii2 image upload behavior with variants (resize, thumbnail, smartcrop) and automatic cleanup.",
+  "type": "yii2-extension",
+  "keywords": [
+    "yii2",
+    "extension",
+    "upload",
+    "image",
+    "behavior",
+    "smartcrop",
+    "autocrop",
+    "nedarta"
+  ],
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Edgars",
+      "email": "edgars@nedarta.com"
+    }
+  ],
+  "require": {
+    "php": ">=7.4",
+    "yiisoft/yii2": "^2.0",
+    "yiisoft/yii2-imagine": "^2.2",
+    "nedarta/yii2-autocrop": "^1.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "nedarta\\upload\\": "src/"
+    }
+  },
+  "extra": {
+    "yii\\composer\\Installer::postCreateProject": {
+    }
+  }
+}
