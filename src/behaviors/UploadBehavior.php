@@ -1,6 +1,6 @@
 <?php
 
-namespace nedarta\upload\behaviors;
+namespace nedarta\behaviors;
 
 use Yii;
 use yii\base\Behavior;
