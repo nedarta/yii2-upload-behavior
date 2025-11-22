@@ -58,6 +58,7 @@ class Event extends ActiveRecord
                 'uploadAlias'     => '@upload/images/event',
                 'uploadAttribute' => 'upload',
                 'imageAttribute'  => 'image',
+                'forceConvert' => 'jpg',
                 'baseName'        => 'trio-metamorfoze',
 
                 'variants' => [
