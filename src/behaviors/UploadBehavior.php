@@ -7,6 +7,8 @@ use yii\base\Behavior;
 use yii\web\UploadedFile;
 use yii\helpers\FileHelper;
 use yii\imagine\Image;
+use Imagine\Gd\Imagine as GdImagine;
+use Imagine\Imagick\Imagine as ImagickImagine;
 
 /**
  * UploadBehavior – full-featured Yii2 image upload behavior with:
@@ -22,6 +24,7 @@ use yii\imagine\Image;
  * - removing old image variants on update
  * - deleting all variants on model delete
  * - optional forced format conversion (forceConvert: jpg, png, webp, jpeg)
+ * - selectable image engine: GD or Imagick
  */
 class UploadBehavior extends Behavior
 {
@@ -31,7 +34,7 @@ class UploadBehavior extends Behavior
     /** @var string attribute where filename will be stored */
     public string $imageAttribute = 'image';
 
-    /** @var string Yii alias for storage folder, e.g. '@upload/images/event' */
+    /** @var string Yii alias for storage folder */
     public string $uploadAlias;
 
     /**
@@ -45,29 +48,22 @@ class UploadBehavior extends Behavior
     /**
      * Forces output file extension for original + variants.
      *
-     * Example:
-     * 'forceConvert' => 'jpg'
-     *
-     * Supported:
-     * - jpg / jpeg
-     * - png
-     * - webp
-     *
      * @var string|null
      */
     public ?string $forceConvert = null;
 
     /**
-     * Variant definitions with pipeline support.
+     * Image engine:
+     * - auto (default): Imagick if available, else GD
+     * - imagick: use Imagick
+     * - gd: use GD
      *
-     * Example:
-     *
-     * 'variants' => [
-     *     '' => ['resize' => [2500, 2500]],
-     *     'r_' => ['resize' => [1920, 1920], 'dependsOn' => ''],
-     *     'c_' => ['smartcrop' => [200, 200], 'dependsOn' => 'r_'],
-     *     'xc_' => ['thumbnail' => [100, 100], 'dependsOn' => 'c_'],
-     * ],
+     * @var string
+     */
+    public string $cropEngine = 'auto';
+
+    /**
+     * Variants configuration.
      *
      * @var array
      */
@@ -75,6 +71,41 @@ class UploadBehavior extends Behavior
 
     private ?UploadedFile $uploadedFile = null;
     private ?string $newFileName = null;
+
+    /** @var \Imagine\Image\ImagineInterface */
+    private $imagine;
+
+    public function init()
+    {
+        parent::init();
+        $this->initEngine();
+    }
+
+    /**
+     * Initialize the Imagine engine based on cropEngine setting.
+     */
+    protected function initEngine(): void
+    {
+        if ($this->cropEngine === 'imagick') {
+            if (extension_loaded('imagick')) {
+                $this->imagine = new ImagickImagine();
+            } else {
+                throw new \RuntimeException("cropEngine='imagick' requires the imagick PHP extension.");
+            }
+        }
+
+        elseif ($this->cropEngine === 'gd') {
+            $this->imagine = new GdImagine();
+        }
+
+        else { // auto
+            if (extension_loaded('imagick')) {
+                $this->imagine = new ImagickImagine();
+            } else {
+                $this->imagine = new GdImagine();
+            }
+        }
+    }
 
     public function events(): array
     {
@@ -130,26 +161,21 @@ class UploadBehavior extends Behavior
             $ext = $this->forceConvert;
         }
 
-        // Final filename
         $this->newFileName = $baseName . '-' . mt_rand(1000, 9999) . '.' . $ext;
 
         $dir = Yii::getAlias($this->uploadAlias);
         $originalPath = $dir . DIRECTORY_SEPARATOR . $this->newFileName;
         $tempPath = $originalPath . '.tmp';
 
-        // Save original upload temporarily (if converting)
+        // Save original
         if (!empty($this->forceConvert)) {
             $this->uploadedFile->saveAs($tempPath);
 
-            // Convert temp file to forced extension
-            Image::getImagine()
-                ->open($tempPath)
-                ->save($originalPath, ['quality' => 90]);
+            // Use selected Imagine engine
+            $this->imagine->open($tempPath)->save($originalPath, ['quality' => 90]);
 
             @unlink($tempPath);
-
         } else {
-            // No conversion, save directly
             $this->uploadedFile->saveAs($originalPath);
         }
 
@@ -160,21 +186,19 @@ class UploadBehavior extends Behavior
             ];
         }
 
-        // -------------------------
-        // VARIANT PIPELINE PROCESS
-        // -------------------------
-
-        // Determine each variant's input
+        // Determine dependsOn sources
         $variantSources = [];
         foreach ($this->variants as $prefix => $config) {
             $variantSources[$prefix] = $config['dependsOn'] ?? null;
         }
 
+        /**
+         * PROCESS VARIANTS
+         */
         foreach ($this->variants as $prefix => $config) {
-
             $target = $dir . DIRECTORY_SEPARATOR . $prefix . $this->newFileName;
 
-            // Determine input file
+            // Determine input
             if (!empty($variantSources[$prefix])) {
                 $inputPrefix = $variantSources[$prefix];
                 $inputFile = $dir . DIRECTORY_SEPARATOR . $inputPrefix . $this->newFileName;
@@ -186,37 +210,35 @@ class UploadBehavior extends Behavior
                 $inputFile = $originalPath;
             }
 
-            // --- PROCESS VARIANT ---
-
+            //
+            // PROCESS VARIANT
+            //
             if (isset($config['resize'])) {
                 [$w, $h] = $config['resize'];
-                Image::resize($inputFile, $w, $h)
-                    ->save($target, ['quality' => $config['quality'] ?? 80])
-                    ->strip();
-            }
 
-            elseif (isset($config['thumbnail'])) {
-                [$w, $h] = $config['thumbnail'];
-                Image::thumbnail($inputFile, $w, $h)
+                $this->imagine
+                    ->open($inputFile)
+                    ->resize(new \Imagine\Image\Box($w, $h))
                     ->save($target, ['quality' => $config['quality'] ?? 80]);
-            }
 
-            elseif (isset($config['smartcrop'])) {
+            } elseif (isset($config['thumbnail'])) {
+                [$w, $h] = $config['thumbnail'];
+
+                Image::thumbnail($inputFile, $w, $h, null, $this->imagine)
+                    ->save($target, ['quality' => $config['quality'] ?? 80]);
+
+            } elseif (isset($config['smartcrop'])) {
                 [$w, $h] = $config['smartcrop'];
 
                 if (class_exists('\nedarta\autocrop\AutoCropper')) {
                     \nedarta\autocrop\AutoCropper::cropAndSave($inputFile, $w, $h, $target);
                 } else {
-                    Image::thumbnail($inputFile, $w, $h)
+                    Image::thumbnail($inputFile, $w, $h, null, $this->imagine)
                         ->save($target, ['quality' => $config['quality'] ?? 80]);
                 }
-            }
 
-            else {
-                // fallback: copy
-                if ($inputFile !== $target) {
-                    copy($inputFile, $target);
-                }
+            } else {
+                copy($inputFile, $target);
             }
         }
 
@@ -236,7 +258,6 @@ class UploadBehavior extends Behavior
 
         $dir = Yii::getAlias($this->uploadAlias);
 
-        // Must delete original even if no original variant defined
         $prefixes = array_keys($this->variants);
         if (!in_array('', $prefixes, true)) {
             $prefixes[] = '';
