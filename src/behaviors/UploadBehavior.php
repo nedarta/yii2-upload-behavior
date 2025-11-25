@@ -9,11 +9,10 @@ use yii\helpers\FileHelper;
 use yii\imagine\Image;
 
 /**
- * UploadBehavior — full-featured Yii2 image upload behavior with:
+ * UploadBehavior – full-featured Yii2 image upload behavior with:
  *
  * - UploadedFile handling
  * - automatic nested directory creation
- * - EXIF auto-rotation support
  * - variant processing:
  *      - resize
  *      - thumbnail
@@ -57,14 +56,6 @@ class UploadBehavior extends Behavior
      * @var string|null
      */
     public ?string $forceConvert = null;
-
-    /**
-     * Auto-rotate image based on EXIF orientation data.
-     * Enabled by default.
-     *
-     * @var bool
-     */
-    public bool $autoRotate = true;
 
     /**
      * Variant definitions with pipeline support.
@@ -114,77 +105,6 @@ class UploadBehavior extends Behavior
         }
     }
 
-    /**
-     * Auto-rotate image based on EXIF orientation and strip EXIF data.
-     *
-     * @param string $filePath
-     * @return void
-     */
-    protected function autoRotateImage(string $filePath): void
-    {
-        if (!$this->autoRotate || !function_exists('exif_read_data')) {
-            return;
-        }
-
-        // Only process JPEG files
-        $imageType = @exif_imagetype($filePath);
-        if ($imageType !== IMAGETYPE_JPEG) {
-            return;
-        }
-
-        // Read EXIF data
-        $exif = @exif_read_data($filePath);
-        
-        if (!$exif || empty($exif['Orientation'])) {
-            return;
-        }
-
-        $orientation = $exif['Orientation'];
-        
-        // Skip if already correct orientation
-        if ($orientation === 1) {
-            return;
-        }
-
-        // Load image
-        $image = Image::getImagine()->open($filePath);
-
-        // Rotate based on orientation
-        switch ($orientation) {
-            case 2:
-                // Flip horizontal
-                $image->flipHorizontally();
-                break;
-            case 3:
-                // Rotate 180°
-                $image->rotate(180);
-                break;
-            case 4:
-                // Flip vertical
-                $image->flipVertically();
-                break;
-            case 5:
-                // Flip horizontal + rotate 270° CCW
-                $image->flipHorizontally()->rotate(270);
-                break;
-            case 6:
-                // Rotate 90° CCW
-                $image->rotate(90);
-                break;
-            case 7:
-                // Flip horizontal + rotate 90° CW
-                $image->flipHorizontally()->rotate(-90);
-                break;
-            case 8:
-                // Rotate 270° CCW
-                $image->rotate(270);
-                break;
-        }
-
-        // Save rotated image
-        $image->save($filePath, ['quality' => 95, 'flatten' => false]);
-    }
-
     public function processUpload(): void
     {
         if (!$this->uploadedFile) {
@@ -215,30 +135,22 @@ class UploadBehavior extends Behavior
 
         $dir = Yii::getAlias($this->uploadAlias);
         $originalPath = $dir . DIRECTORY_SEPARATOR . $this->newFileName;
-        
-        // Use proper extension for temp file
-        $tempExt = $this->uploadedFile->extension;
-        $tempPath = $dir . DIRECTORY_SEPARATOR . 'temp_' . uniqid() . '.' . $tempExt;
+        $tempPath = $originalPath . '.tmp';
 
-        // Save original upload temporarily
-        $this->uploadedFile->saveAs($tempPath);
-
-        // Apply EXIF auto-rotation on temp file first
-        $this->autoRotateImage($tempPath);
-
-        // Convert to final format if needed
+        // Save original upload temporarily (if converting)
         if (!empty($this->forceConvert)) {
+            $this->uploadedFile->saveAs($tempPath);
+
+            // Convert temp file to forced extension
             Image::getImagine()
                 ->open($tempPath)
                 ->save($originalPath, ['quality' => 90]);
-        } else {
-            // Just move/rename the rotated temp file
-            rename($tempPath, $originalPath);
-        }
 
-        // Clean up temp file if it still exists
-        if (file_exists($tempPath)) {
             @unlink($tempPath);
+
+        } else {
+            // No conversion, save directly
+            $this->uploadedFile->saveAs($originalPath);
         }
 
         // Default variant
