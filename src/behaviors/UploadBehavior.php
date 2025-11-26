@@ -208,7 +208,7 @@ class UploadBehavior extends Behavior
                     $image->flipHorizontally();
                     break;
                 case 3:
-                    $image->rotate(180);
+                    $image->rotate(0);
                     break;
                 case 4:
                     $image->flipVertically();
