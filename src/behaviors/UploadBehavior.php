@@ -4,155 +4,258 @@ namespace nedarta\behaviors;
 
 use Yii;
 use yii\base\Behavior;
+use yii\db\ActiveRecord;
 use yii\web\UploadedFile;
 use yii\helpers\FileHelper;
 use yii\imagine\Image;
 
 /**
- * UploadBehavior – full-featured Yii2 image upload behavior with:
- *
- * - UploadedFile handling
- * - automatic nested directory creation
- * - variant processing:
- *      - resize
- *      - thumbnail
- *      - smartcrop (via nedarta/yii2-smart-cropper)
- *      - copy fallback
- * - dependency-based variant pipeline (dependsOn)
- * - removing old image variants on update
- * - deleting all variants on model delete
- * - optional forced format conversion (e.g. everything -> webp)
- *
- * Typical usage:
- *
- * ```php
- * public function behaviors()
- * {
- *     return [
- *         [
- *             'class' => UploadBehavior::class,
- *             'imageAttribute' => 'image',
- *             'uploadAlias' => '@webroot/uploads/news',
- *             'variants' => [
- *                 '' => ['resize' => [2500, 2500]], // original
- *                 'thumb_' => ['thumbnail' => [400, 300]],
- *             ],
- *         ],
- *     ];
- * }
- * ```
+ * UploadBehavior handles file uploads, optional format conversion,
+ * EXIF-based auto-rotation and generation of image variants.
  */
 class UploadBehavior extends Behavior
 {
-    /**
-     * @var string Attribute name in the owner model that stores filename.
-     */
+    /** @var string Attribute containing the UploadedFile instance */
+    public string $uploadAttribute = 'upload';
+
+    /** @var string Attribute where the final filename is stored */
     public string $imageAttribute = 'image';
 
-    /**
-     * @var string UploadedFile instance attribute name in the owner model.
-     */
-    public string $fileAttribute = 'uploadedFile';
+    /** @var string Yii alias pointing to the upload directory */
+    public string $uploadAlias;
 
     /**
-     * @var string Upload base path alias (directory where images will be stored).
+     * Base filename for generated images (without extension).
+     * Can be a string or a callable fn($owner): string.
      *
-     * Example: '@webroot/uploads/news'
-     */
-    public string $uploadAlias = '@webroot/uploads';
-
-    /**
-     * @var array Variants configuration.
-     *
-     * Example:
-     * [
-     *     '' => ['resize' => [2500, 2500]],
-     *     'thumb_' => ['thumbnail' => [400, 300]],
-     * ]
-     *
-     * Each variant may contain:
-     *  - 'resize' => [width, height]
-     *  - 'thumbnail' => [width, height]
-     *  - 'smartcrop' => [width, height]
-     *  - 'copy' => true (just copy original)
-     *  - 'dependsOn' => 'prefix' (string) – variant dependency
-     */
-    public array $variants = [];
-
-    /**
-     * @var string|null Forced output extension for stored images (e.g. 'webp', 'jpg').
-     * If null, original extension is preserved.
-     */
-    public ?string $forceConvert = null;
-
-    /**
-     * @var callable|string Base filename (without extension).
-     * If callable, it receives $owner and must return string.
-     * Otherwise static string is used.
+     * @var string|callable
      */
     public $baseName = 'image';
 
     /**
-     * @var UploadedFile|null
+     * Force-convert uploaded file to this extension (e.g. "jpg", "jiff", "png", "webp").
+     *
+     * @var string|null
      */
-    protected ?UploadedFile $uploadedFile = null;
+    public ?string $forceConvert = null;
 
     /**
-     * @var string|null New generated filename.
+     * Whether to auto-rotate JPEG images based on EXIF orientation.
+     *
+     * @var bool
      */
-    protected ?string $newFileName = null;
+    public bool $autoRotate = true;
 
     /**
-     * {@inheritdoc}
+     * Variant configuration.
+     *
+     * Example:
+     * [
+     *     ''   => ['resize'    => [1600, 1600]],
+     *     'r_' => ['resize'    => [1200, 1200]],
+     *     'c_' => ['smartcrop' => [200, 200], 'dependsOn' => 'r_'],
+     *     'xc_' => ['thumbnail' => [100, 100], 'dependsOn' => 'c_'],
+     * ]
+     *
+     * @var array
+     */
+    public array $variants = [];
+
+    /** @var UploadedFile|null */
+    private ?UploadedFile $uploadedFile = null;
+
+    /** @var string|null */
+    private ?string $newFileName = null;
+
+    /**
+     * @inheritdoc
      */
     public function events(): array
     {
         return [
-            \yii\db\ActiveRecord::EVENT_BEFORE_VALIDATE => 'handleFile',
-            \yii\db\ActiveRecord::EVENT_BEFORE_INSERT => 'beforeSave',
-            \yii\db\ActiveRecord::EVENT_BEFORE_UPDATE => 'beforeSave',
-            \yii\db\ActiveRecord::EVENT_AFTER_INSERT => 'afterSave',
-            \yii\db\ActiveRecord::EVENT_AFTER_UPDATE => 'afterSave',
-            \yii\db\ActiveRecord::EVENT_BEFORE_DELETE => 'beforeDelete',
+            ActiveRecord::EVENT_BEFORE_VALIDATE => 'captureUpload',
+            ActiveRecord::EVENT_AFTER_INSERT    => 'processUpload',
+            ActiveRecord::EVENT_AFTER_UPDATE    => 'processUpload',
+            ActiveRecord::EVENT_BEFORE_DELETE   => 'deleteVariants',
         ];
     }
 
     /**
-     * Grab UploadedFile from owner.
+     * Captures the uploaded file instance from the owner model.
+     *
+     * @return void
      */
-    public function handleFile(): void
+    public function captureUpload(): void
     {
-        $owner = $this->owner;
-        $this->uploadedFile = UploadedFile::getInstance($owner, $this->fileAttribute);
+        $this->uploadedFile = UploadedFile::getInstance($this->owner, $this->uploadAttribute);
     }
 
     /**
-     * Ensure upload directory exists.
+     * Ensures that the base upload directory and the target directory exist.
+     *
+     * @return void
      */
     protected function ensureUploadDir(): void
     {
-        $dir = Yii::getAlias($this->uploadAlias);
-        if (!is_dir($dir)) {
-            FileHelper::createDirectory($dir, 0775, true);
+        $base   = Yii::getAlias('@upload');
+        $target = Yii::getAlias($this->uploadAlias);
+
+        if (!is_dir($base)) {
+            FileHelper::createDirectory($base, 0777, true);
+        }
+
+        if (!is_dir($target)) {
+            FileHelper::createDirectory($target, 0777, true);
         }
     }
 
     /**
-     * Before saving model – if new file uploaded, prepare upload.
+     * Reads EXIF orientation value from a file.
+     *
+     * @param string $file Absolute path to the image.
+     * @return int|null EXIF orientation or null if not available.
      */
-    public function beforeSave(): void
+    protected function readExifOrientation(string $file): ?int
     {
-        if (!$this->uploadedFile) {
+        if (!function_exists('exif_read_data')) {
+            return null;
+        }
+
+        try {
+            $exif = @exif_read_data($file, 'IFD0', false);
+            return !empty($exif['Orientation']) ? (int)$exif['Orientation'] : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Removes EXIF orientation and other metadata from an image,
+     * using Imagick if available, otherwise falling back to GD (JPEG only).
+     *
+     * @param string $filePath Absolute path to image.
+     * @param string $ext      File extension (jpg, jpeg, etc.).
+     * @param int    $quality  JPEG quality for re-encoding in fallback.
+     * @return void
+     */
+    protected function resetOrientationTag(string $filePath, string $ext, int $quality = 92): void
+    {
+        $ext = strtolower($ext);
+
+        // Imagick path
+        if (class_exists(\Imagick::class)) {
+            try {
+                $im = new \Imagick($filePath);
+                $im->setImageOrientation(\Imagine\Image\ImageInterface::ORIENTATION_TOPLEFT);
+                $im->stripImage();
+                $im->setImageCompressionQuality($quality);
+                $im->writeImage($filePath);
+                $im->destroy();
+                return;
+            } catch (\Throwable) {
+                // fall through to GD
+            }
+        }
+
+        // GD fallback (JPEG only)
+        if (in_array($ext, ['jpg', 'jpeg'], true)
+            && function_exists('imagecreatefromjpeg')
+            && function_exists('imagejpeg')
+        ) {
+            try {
+                $gd = @imagecreatefromjpeg($filePath);
+                if ($gd) {
+                    @imagejpeg($gd, $filePath, $quality);
+                    imagedestroy($gd);
+                }
+            } catch (\Throwable) {
+                // silently ignore
+            }
+        }
+    }
+
+    /**
+     * Applies EXIF-based rotation to the image file (if needed),
+     * then resets orientation metadata.
+     *
+     * @param string   $filePath    Absolute path to the image.
+     * @param int|null $orientation EXIF orientation value.
+     * @param string   $ext         File extension.
+     * @return void
+     */
+    protected function autoRotateImage(string $filePath, ?int $orientation, string $ext): void
+    {
+        if (!$this->autoRotate) {
             return;
         }
 
-        $this->processUpload();
+        $ext = strtolower($ext);
+        if (!in_array($ext, ['jpg', 'jpeg'], true)) {
+            return;
+        }
+
+        if (!$orientation || $orientation === 1) {
+            // no rotation needed, still ensure orientation tag is clean
+            $this->resetOrientationTag($filePath, $ext);
+            return;
+        }
+
+        try {
+            $image = Image::getImagine()->open($filePath);
+
+            switch ($orientation) {
+                case 2:
+                    $image->flipHorizontally();
+                    break;
+                case 3:
+                    $image->rotate(180);
+                    break;
+                case 4:
+                    $image->flipVertically();
+                    break;
+                case 5:
+                    $image->flipHorizontally()->rotate(-90);
+                    break;
+
+                /**
+                 * Orientation 6:
+                 * For Android/Samsung it effectively means "rotate +90°".
+                 */
+                case 6:
+                    $image->rotate(90);
+                    break;
+
+                case 7:
+                    $image->flipHorizontally()->rotate(90);
+                    break;
+                case 8:
+                    $image->rotate(90);
+                    break;
+            }
+
+            if (method_exists($image, 'strip')) {
+                $image->strip();
+            }
+
+            $image->save($filePath, ['jpeg_quality' => 92]);
+
+        } catch (\Throwable) {
+            // ignore rotation failures
+        }
+
+        $this->resetOrientationTag($filePath, $ext, 92);
     }
 
     /**
-     * Core upload processing (filename generation, saving original, variants).
+     * Main upload processing:
+     *  - removes old variants
+     *  - saves original (optionally converted)
+     *  - applies EXIF-based rotation
+     *  - generates all configured variants
+     *
+     * @return void
      */
-    function processUpload(): void
+    public function processUpload(): void
     {
         if (!$this->uploadedFile) {
             return;
@@ -161,234 +264,140 @@ class UploadBehavior extends Behavior
         $owner = $this->owner;
         $this->ensureUploadDir();
 
-        // Remove old files first
+        // remove old versions
         if (!empty($owner->{$this->imageAttribute})) {
             $this->deleteVariants();
         }
 
-        // Compute base filename
+        // compute filename
         $baseName = is_callable($this->baseName)
             ? call_user_func($this->baseName, $owner)
             : $this->baseName;
 
-        // Define extension
-        $ext = $this->uploadedFile->extension;
-        if (!empty($this->forceConvert)) {
-            $ext = $this->forceConvert;
+        $ext = strtolower($this->uploadedFile->extension);
+        if ($this->forceConvert) {
+            $ext = strtolower($this->forceConvert);
         }
 
-        // Final filename
         $this->newFileName = $baseName . '-' . mt_rand(1000, 9999) . '.' . $ext;
 
-        $dir = Yii::getAlias($this->uploadAlias);
+        $dir          = Yii::getAlias($this->uploadAlias);
         $originalPath = $dir . DIRECTORY_SEPARATOR . $this->newFileName;
-        $tempPath = $originalPath . '.tmp';
+        $tempPath     = $originalPath . '.tmp';
 
-        // Save original upload temporarily (if converting)
-        if (!empty($this->forceConvert)) {
+        $originalTemp = $this->uploadedFile->tempName;
+
+        // read EXIF orientation from temp file
+        $orientation = $this->readExifOrientation($originalTemp);
+
+        // save original (optionally converting)
+        if ($this->forceConvert) {
             $this->uploadedFile->saveAs($tempPath);
 
-            // Fix orientation & strip EXIF on the temporary original file
-            $this->fixOrientationAndStripExif($tempPath);
-
-            // Convert temp file to forced extension
             Image::getImagine()
                 ->open($tempPath)
                 ->save($originalPath, ['quality' => 90]);
 
             @unlink($tempPath);
-
         } else {
-            // No conversion, save directly
-            $this->uploadedFile->saveAs($originalPath);
-
-            // Fix orientation & strip EXIF on the saved file
-            $this->fixOrientationAndStripExif($originalPath);
+            Image::getImagine()
+                ->open($originalTemp)
+                ->save($originalPath, ['jpeg_quality' => 95]);
         }
 
-        // Default variant
+        // apply rotation + orientation cleanup on original
+        $this->autoRotateImage($originalPath, $orientation, $ext);
+
+        // default variants if none provided
         if (empty($this->variants)) {
             $this->variants = [
                 '' => ['resize' => [2500, 2500]],
             ];
         }
 
-        // -------------------------
-        // VARIANT PIPELINE PROCESS
-        // -------------------------
+        // derive extension once for variant cleanup
+        $variantExt = strtolower(pathinfo($this->newFileName, PATHINFO_EXTENSION));
 
-        // Determine variant dependency order
-        $ordered = $this->orderVariantsByDependencies($this->variants);
+        // generate variants (respecting dependsOn)
+        foreach ($this->variants as $prefix => $config) {
+            $inputFile = $originalPath;
 
-        // Keep track of generated variant paths
-        $variantPaths = [];
+            if (isset($config['dependsOn'])) {
+                $inputFile = $dir . DIRECTORY_SEPARATOR . $config['dependsOn'] . $this->newFileName;
+            }
 
-        foreach ($ordered as $prefix => $config) {
-            $variantPath = $dir . DIRECTORY_SEPARATOR . $prefix . $this->newFileName;
+            $target = $dir . DIRECTORY_SEPARATOR . $prefix . $this->newFileName;
 
-            // Determine source path:
-            // - if dependsOn is set, use that variant as input
-            // - otherwise use the original file
-            $sourcePath = $originalPath;
-
-            if (!empty($config['dependsOn'])) {
-                $depPrefix = $config['dependsOn'];
-                if (!isset($variantPaths[$depPrefix])) {
-                    // If dependency missing, skip generating this variant
-                    continue;
+            // resize
+            if (isset($config['resize'])) {
+                [$w, $h] = $config['resize'];
+                $img     = Image::resize($inputFile, $w, $h);
+                if (method_exists($img, 'strip')) {
+                    $img->strip();
                 }
-                $sourcePath = $variantPaths[$depPrefix];
-            }
+                $img->save($target, ['quality' => $config['quality'] ?? 80]);
+                $this->resetOrientationTag($target, $variantExt);
 
-            // Process variant according to config
-            $this->processVariant($sourcePath, $variantPath, $config);
-
-            // Save path for possible dependent variants
-            $variantPaths[$prefix] = $variantPath;
-        }
-
-        // Persist new filename to owner
-        $owner->{$this->imageAttribute} = $this->newFileName;
-    }
-
-    /**
-     * Determine variant processing order based on `dependsOn` relations.
-     *
-     * Simple topological ordering, assuming no circular dependencies.
-     *
-     * @param array $variants
-     * @return array
-     */
-    protected function orderVariantsByDependencies(array $variants): array
-    {
-        $ordered = [];
-        $visited = [];
-
-        $visit = function ($prefix) use (&$visit, &$ordered, &$visited, $variants) {
-            if (isset($visited[$prefix])) {
-                return;
-            }
-            $visited[$prefix] = true;
-
-            $config = $variants[$prefix];
-
-            if (!empty($config['dependsOn'])) {
-                $dep = $config['dependsOn'];
-                if (isset($variants[$dep])) {
-                    $visit($dep);
+            // thumbnail
+            } elseif (isset($config['thumbnail'])) {
+                [$w, $h] = $config['thumbnail'];
+                $img     = Image::thumbnail($inputFile, $w, $h);
+                if (method_exists($img, 'strip')) {
+                    $img->strip();
                 }
+                $img->save($target, ['quality' => $config['quality'] ?? 80]);
+                $this->resetOrientationTag($target, $variantExt);
+
+            // smartcrop (external library)
+            } elseif (isset($config['smartcrop'])) {
+                [$w, $h] = $config['smartcrop'];
+
+                if (class_exists('\nedarta\autocrop\AutoCropper')) {
+                    \nedarta\autocrop\AutoCropper::cropAndSave($inputFile, $w, $h, $target);
+                    // enforce clean EXIF even if AutoCropper doesn't strip
+                    $this->resetOrientationTag($target, $variantExt);
+                } else {
+                    $img = Image::thumbnail($inputFile, $w, $h);
+                    if (method_exists($img, 'strip')) {
+                        $img->strip();
+                    }
+                    $img->save($target, ['quality' => $config['quality'] ?? 80]);
+                    $this->resetOrientationTag($target, $variantExt);
+                }
+
+            // fallback: simple copy
+            } else {
+                if ($inputFile !== $target) {
+                    copy($inputFile, $target);
+                }
+                $this->resetOrientationTag($target, $variantExt);
             }
-
-            $ordered[$prefix] = $config;
-        };
-
-        foreach (array_keys($variants) as $prefix) {
-            $visit($prefix);
         }
 
-        return $ordered;
-    }
-
-    /**
-     * Process a single variant according to its configuration.
-     *
-     * Supported keys:
-     *  - 'resize'    => [w, h]
-     *  - 'thumbnail' => [w, h]
-     *  - 'smartcrop' => [w, h]
-     *  - 'copy'      => true
-     *
-     * @param string $sourcePath
-     * @param string $targetPath
-     * @param array $config
-     */
-    protected function processVariant(string $sourcePath, string $targetPath, array $config): void
-    {
-        // Copy-only variant
-        if (!empty($config['copy'])) {
-            copy($sourcePath, $targetPath);
-            return;
-        }
-
-        $imagine = Image::getImagine();
-        $image = $imagine->open($sourcePath);
-
-        // Smart crop variant via separate extension
-        if (isset($config['smartcrop'][0], $config['smartcrop'][1])) {
-            $width = (int)$config['smartcrop'][0];
-            $height = (int)$config['smartcrop'][1];
-
-            if (class_exists('\\nedarta\\smartcrop\\SmartCropper')) {
-                /** @var \nedarta\smartcrop\SmartCropper $cropper */
-                $cropper = Yii::createObject([
-                    'class' => '\\nedarta\\smartcrop\\SmartCropper',
-                ]);
-
-                $image = $cropper->smartCrop($image, $width, $height);
-                $image->save($targetPath, ['quality' => 90]);
-                return;
-            }
-
-            // Fallback to simple thumbnail if SmartCropper not available
-            $thumbnail = Image::thumbnail($sourcePath, $width, $height);
-            $thumbnail->save($targetPath, ['quality' => 90]);
-            return;
-        }
-
-        // Thumbnail variant
-        if (isset($config['thumbnail'][0], $config['thumbnail'][1])) {
-            $width = (int)$config['thumbnail'][0];
-            $height = (int)$config['thumbnail'][1];
-
-            $thumbnail = Image::thumbnail($sourcePath, $width, $height);
-            $thumbnail->save($targetPath, ['quality' => 90]);
-            return;
-        }
-
-        // Resize variant
-        if (isset($config['resize'][0], $config['resize'][1])) {
-            $width = (int)$config['resize'][0];
-            $height = (int)$config['resize'][1];
-
-            $size = $image->getSize();
-            $ratio = min($width / $size->getWidth(), $height / $size->getHeight(), 1);
-
-            $newSize = $size->scale($ratio);
-            $image->resize($newSize)->save($targetPath, ['quality' => 90]);
-            return;
-        }
-
-        // Default: just copy
-        copy($sourcePath, $targetPath);
-    }
-
-    /**
-     * After model is saved, write attribute with final filename.
-     */
-    public function afterSave(): void
-    {
-        if ($this->newFileName === null) {
-            return;
-        }
-
-        $owner = $this->owner;
+        // store filename in owner
         $owner->{$this->imageAttribute} = $this->newFileName;
         $owner->updateAttributes([$this->imageAttribute => $this->newFileName]);
+
+        $this->uploadedFile = null;
     }
 
+    /**
+     * Deletes all variants and the original image for the current record.
+     *
+     * @return void
+     */
     public function deleteVariants(): void
     {
-        $owner = $this->owner;
+        $owner    = $this->owner;
         $filename = $owner->{$this->imageAttribute};
 
-        if (empty($filename)) {
+        if (!$filename) {
             return;
         }
 
-        $dir = Yii::getAlias($this->uploadAlias);
-
-        // Must delete original even if no original variant defined
+        $dir      = Yii::getAlias($this->uploadAlias);
         $prefixes = array_keys($this->variants);
+
         if (!in_array('', $prefixes, true)) {
             $prefixes[] = '';
         }
@@ -400,115 +409,4 @@ class UploadBehavior extends Behavior
             }
         }
     }
-
-    /**
-     * Fix JPEG EXIF orientation and then strip EXIF/metadata.
-     *
-     * Tries Imagick first (if available), falls back to GD.
-     *
-     * @param string $path Absolute filesystem path to the saved image.
-     */
-    protected function fixOrientationAndStripExif(string $path): void
-    {
-        // Only handle JPEGs; EXIF orientation is relevant there.
-        if (!is_file($path)) {
-            return;
-        }
-
-        $info = @getimagesize($path);
-        if (!$info || empty($info['mime']) || $info['mime'] !== 'image/jpeg') {
-            return;
-        }
-
-        // If EXIF extension is not available, we can still try Imagick auto-orientation.
-        $hasExif = function_exists('exif_read_data');
-
-        // Prefer Imagick if available
-        if (class_exists('\\Imagick')) {
-            try {
-                $img = new \Imagick($path);
-
-                $orientation = null;
-
-                // Try to read orientation from Imagick property first
-                $orientationProp = $img->getImageProperty('exif:Orientation');
-                if (!empty($orientationProp)) {
-                    $orientation = (int)$orientationProp;
-                } elseif ($hasExif) {
-                    $exif = @exif_read_data($path);
-                    if (!empty($exif['Orientation'])) {
-                        $orientation = (int)$exif['Orientation'];
-                    }
-                }
-
-                if (!empty($orientation)) {
-                    switch ($orientation) {
-                        case 3:
-                            $img->rotateImage('#000000', 180);
-                            break;
-                        case 6:
-                            $img->rotateImage('#000000', 90);
-                            break;
-                        case 8:
-                            $img->rotateImage('#000000', -90);
-                            break;
-                    }
-
-                    // Normalize orientation so that consumers don't re-rotate
-                    if (method_exists($img, 'setImageOrientation')) {
-                        $img->setImageOrientation(\Imagick::ORIENTATION_TOPLEFT);
-                    }
-                }
-
-                // Strip all metadata, including EXIF
-                if (method_exists($img, 'stripImage')) {
-                    $img->stripImage();
-                }
-
-                $img->writeImage($path);
-                $img->destroy();
-
-                return;
-            } catch (\Throwable $e) {
-                // Fallback to GD below
-            }
-        }
-
-        // GD fallback: rotate & re-encode (this drops EXIF automatically)
-        if (!$hasExif) {
-            return;
-        }
-
-        $exif = @exif_read_data($path);
-        if (empty($exif['Orientation'])) {
-            return;
-        }
-
-        $orientation = (int)$exif['Orientation'];
-
-        $img = @imagecreatefromjpeg($path);
-        if (!$img) {
-            return;
-        }
-
-        switch ($orientation) {
-            case 3:
-                $img = imagerotate($img, 180, 0);
-                break;
-            case 6:
-                $img = imagerotate($img, -90, 0);
-                break;
-            case 8:
-                $img = imagerotate($img, 90, 0);
-                break;
-            default:
-                // No change needed
-                break;
-        }
-
-        // Re-save JPEG; EXIF is discarded.
-        @imagejpeg($img, $path, 90);
-        imagedestroy($img);
-    }
 }
-
