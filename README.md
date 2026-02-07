@@ -113,7 +113,7 @@ public function actionCreate()
 | `imageAttribute` | string | `'image'` | Database attribute where filename is stored |
 | `uploadAlias` | string | required | Yii alias for storage folder |
 | `baseName` | string\|Closure | `'image'` | Base filename before random number |
-| `autoRotate` | bool | `true` | Automatically rotate images based on EXIF orientation |
+| `autoRotate` | bool | `true` | Reserved flag (auto-rotation currently always runs) |
 | `forceConvert` | string\|null | `null` | Force output format: 'jpg', 'png', 'webp', 'jpeg' |
 | `variants` | array | `['' => ['resize' => [2500, 2500]]]` | Variant definitions |
 
@@ -127,13 +127,13 @@ public function actionCreate()
 
 ### EXIF Auto-Rotation
 
-By default, images are automatically rotated based on their EXIF orientation data (common with phone cameras). To disable:
+By default, images are automatically rotated based on their EXIF orientation data (common with phone cameras).
 
 ```php
 'autoRotate' => false,
 ```
 
-**Note:** Auto-rotation only works with JPEG files and requires the PHP EXIF extension.
+**Note:** Auto-rotation only works with JPEG files and requires the PHP EXIF extension. The `autoRotate` flag is present for future control, but in the current version rotation always runs when EXIF orientation is detected.
 
 ### Format Conversion
 
@@ -348,7 +348,7 @@ After uploading with variants, your directory will look like:
 ### Images not rotating correctly
 - Ensure PHP EXIF extension is installed: `php -m | grep exif`
 - Check that images are JPEG format (EXIF only works with JPEG)
-- Try setting `'autoRotate' => false` to test without rotation
+- If you need to fully disable rotation, you will need to customize `UploadBehavior::autoRotateImage()` (the `autoRotate` flag is currently not enforced)
 
 ### Variants not created
 - Check directory permissions (775 or 777)

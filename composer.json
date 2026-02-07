@@ -21,9 +21,19 @@
   ],
   "require": {
     "php": ">=7.4",
-    "yiisoft/yii2": "^2.0",
-    "yiisoft/yii2-imagine": "^2.2",
-    "nedarta/yii2-autocrop": "^1.0"
+    "yiisoft/yii2": "^2.0.52",
+    "yiisoft/yii2-imagine": "^2.2"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^9.5"
+  },
+  "scripts": {
+    "test": "vendor/bin/phpunit tests"
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "nedarta\\behaviors\\tests\\": "tests/"
+    }
   },
   "autoload": {
     "psr-4": {
@@ -31,7 +41,17 @@
     }
   },
   "extra": {
-    "yii\\composer\\Installer::postCreateProject": {
+    "yii\\composer\\Installer::postCreateProject": {}
+  },
+  "repositories": [
+    {
+      "type": "composer",
+      "url": "https://asset-packagist.org"
+    }
+  ],
+  "config": {
+    "allow-plugins": {
+      "yiisoft/yii2-composer": true
     }
   }
 }

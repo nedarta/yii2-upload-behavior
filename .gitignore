@@ -1,0 +1,12 @@
+/vendor/
+/tests/runtime/
+/runtime/
+/upload/
+/web/upload/
+/.phpunit.result.cache
+.idea/
+.vscode/
+*.log
+*.tmp
+Thumbs.db
+Desktop.ini
