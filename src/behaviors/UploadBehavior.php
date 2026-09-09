@@ -10,7 +10,7 @@ use yii\helpers\FileHelper;
 use yii\imagine\Image;
 
 /**
- * UploadBehavior handles uploads, EXIF auto-rotation and image variants.
+ * UploadBehavior handles uploads, EXIF autorotation and image variants.
  */
 class UploadBehavior extends Behavior
 {
@@ -24,8 +24,8 @@ class UploadBehavior extends Behavior
 
     public array $variants = [];
 
-    private ?UploadedFile $uploadedFile = null;
-    private ?string $newFileName = null;
+    protected ?UploadedFile $uploadedFile = null;
+    protected ?string $newFileName = null;
 
     public function events(): array
     {
@@ -177,66 +177,63 @@ class UploadBehavior extends Behavior
         $this->resetExif($filePath, $ext);
     }
 
-    public function processUpload(): void
+    protected function generateUniqueName(UploadedFile $file): string
     {
-        if (!$this->uploadedFile) {
-            return;
-        }
-
-        $this->ensureUploadDir();
-
         $owner = $this->owner;
 
-        if (!empty($owner->{$this->imageAttribute})) {
-            $this->deleteVariants();
-        }
-
-        // -----------------------------
-        // File naming
-        // -----------------------------
         $baseName = is_callable($this->baseName)
             ? call_user_func($this->baseName, $owner)
             : $this->baseName;
 
-        $ext = strtolower($this->uploadedFile->extension);
+        $ext = strtolower($file->extension);
         if ($this->forceConvert) {
             $ext = strtolower($this->forceConvert);
         }
 
-        $this->newFileName = $baseName . '-' . mt_rand(1000, 9999) . '.' . $ext;
+        $dir = Yii::getAlias($this->uploadAlias);
 
-        $dir  = Yii::getAlias($this->uploadAlias);
+        do {
+            $name = $baseName . '-' . mt_rand(1000, 9999) . '.' . $ext;
+        } while (file_exists($dir . '/' . $name));
+
+        return $name;
+    }
+
+    protected function saveSingle(UploadedFile $file): string
+    {
+        $this->ensureUploadDir();
+
+        $dir = Yii::getAlias($this->uploadAlias);
+        $this->newFileName = $this->generateUniqueName($file);
         $path = $dir . '/' . $this->newFileName;
 
-        // -----------------------------
-        // EXIF orientation read
-        // -----------------------------
-        $orientation = $this->readExifOrientation($this->uploadedFile->tempName);
+        $orientation = $this->readExifOrientation($file->tempName);
 
-        // -----------------------------
-        // Save original
-        // -----------------------------
         Image::getImagine()
-            ->open($this->uploadedFile->tempName)
+            ->open($file->tempName)
             ->save($path, ['jpeg_quality' => 95]);
 
-        // -----------------------------
-        // Apply EXIF rotation
-        // -----------------------------
+        $ext = pathinfo($this->newFileName, PATHINFO_EXTENSION);
         $this->autoRotateImage($path, $orientation, $ext);
+        $this->saveVariants();
 
-        // -----------------------------
-        // Generate variants
-        // -----------------------------
+        return $this->newFileName;
+    }
+
+    protected function saveVariants(): void
+    {
         if (empty($this->variants)) {
             $this->variants = [
                 '' => ['resize' => [2500, 2500]],
             ];
         }
 
+        $dir = Yii::getAlias($this->uploadAlias);
+        $ext = pathinfo($this->newFileName, PATHINFO_EXTENSION);
+
         foreach ($this->variants as $prefix => $config) {
 
-            $input = $path;
+            $input = $dir . '/' . $this->newFileName;
             if (isset($config['dependsOn'])) {
                 $input = $dir . '/' . $config['dependsOn'] . $this->newFileName;
             }
@@ -283,43 +280,63 @@ class UploadBehavior extends Behavior
             copy($input, $target);
             $this->resetExif($target, $ext);
         }
+    }
 
-        // -----------------------------
-        // Save to model
-        // -----------------------------
+    public function processUpload(): void
+    {
+        if (!$this->uploadedFile) {
+            return;
+        }
+
+        $owner = $this->owner;
+
+        if (!empty($owner->{$this->imageAttribute})) {
+            $this->deleteVariants();
+        }
+
+        $this->newFileName = $this->saveSingle($this->uploadedFile);
+
         $owner->{$this->imageAttribute} = $this->newFileName;
         $owner->updateAttributes([$this->imageAttribute => $this->newFileName]);
     }
 
-        public function deleteVariants(): void
-        {
-            $filename = $this->owner->{$this->imageAttribute};
-            if (!$filename) {
-                return;
+    public function deleteVariants(): void
+    {
+        $filename = $this->owner->{$this->imageAttribute};
+        if (!$filename) {
+            return;
+        }
+
+        $this->deleteFilesFor($filename);
+    }
+
+    protected function deleteFilesFor(string $filename): void
+    {
+        $dir = Yii::getAlias($this->uploadAlias);
+        if (!is_dir($dir)) {
+            return;
+        }
+
+        // find basename and extension
+        $pathInfo = pathinfo($filename);
+        $base = $pathInfo['filename'];
+        $ext = $pathInfo['extension'] ?? null;
+
+        // scan directory
+        foreach (scandir($dir) as $file) {
+
+            // skip dots
+            if ($file === '.' || $file === '..') {
+                continue;
             }
 
-            $dir = Yii::getAlias($this->uploadAlias);
+            // delete ANY file that starts with the same baseName
+            // example: image-1234.jpg, r_image-1234.jpg, xc_image-1234.jpg
+            if (str_contains($file, $base) && str_ends_with($file, ".$ext")) {
 
-            // find basename and extension
-            $pathInfo = pathinfo($filename);
-            $base = $pathInfo['filename'];
-            $ext = $pathInfo['extension'];
-
-            // scan directory
-            foreach (scandir($dir) as $file) {
-
-                // skip dots
-                if ($file === '.' || $file === '..') {
-                    continue;
-                }
-
-                // delete ANY file that starts with the same baseName
-                // example: image-1234.jpg, r_image-1234.jpg, xc_image-1234.jpg
-                if (str_contains($file, $base) && str_ends_with($file, ".$ext")) {
-
-                    @unlink($dir . DIRECTORY_SEPARATOR . $file);
-                }
+                @unlink($dir . DIRECTORY_SEPARATOR . $file);
             }
         }
+    }
 
 }

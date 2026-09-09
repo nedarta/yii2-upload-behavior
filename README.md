@@ -5,6 +5,7 @@ Full-featured Yii2 image upload behavior with advanced processing capabilities.
 ## Features
 
 - **Automatic file uploads** via `UploadedFile`
+- **Multiple image uploads** - one-to-many gallery storage in a related table via `MultipleUploadBehavior`
 - **Nested directory creation** with proper permissions
 - **EXIF auto-rotation** - automatically corrects image orientation from cameras/phones
 - **Multiple image variants** with flexible processing options:
@@ -102,6 +103,111 @@ public function actionCreate()
     return $this->render('create', ['model' => $model]);
 }
 ```
+
+## Multiple Image Uploads
+
+Use `MultipleUploadBehavior` to store multiple images per model in a related table (one-to-many gallery). It reuses the full processing pipeline (EXIF auto-rotation, variants, format conversion) for every uploaded file.
+
+### Behavior Configuration
+
+```php
+use nedarta\behaviors\MultipleUploadBehavior;
+
+class Event extends \yii\db\ActiveRecord
+{
+    public $images; // Virtual attribute receiving multiple UploadedFile instances
+
+    public function rules()
+    {
+        return [
+            [['images'], 'file', 'extensions' => 'png, jpg, jpeg', 'maxFiles' => 10],
+        ];
+    }
+
+    public function behaviors()
+    {
+        return [
+            [
+                'class' => MultipleUploadBehavior::class,
+                'uploadAttribute' => 'images',
+                'relatedModelClass' => EventImage::class,
+                'relatedImageAttribute' => 'image',
+                'relatedFkAttribute' => 'event_id', // optional: auto-derived from model name if omitted
+                'uploadAlias' => '@upload/images/event',
+                'variants' => [
+                    '' => ['resize' => [2500, 2500]],
+                    'thumb_' => ['thumbnail' => [300, 300]],
+                ],
+            ],
+        ];
+    }
+}
+```
+
+### Related Model and Migration
+
+```php
+class EventImage extends \yii\db\ActiveRecord
+{
+    public static function tableName()
+    {
+        return 'event_image';
+    }
+
+    public function getEvent()
+    {
+        return $this->hasOne(Event::class, ['id' => 'event_id']);
+    }
+}
+```
+
+```php
+public function safeUp()
+{
+    $this->createTable('{{%event_image}}', [
+        'id' => $this->primaryKey(),
+        'event_id' => $this->integer()->notNull(),
+        'image' => $this->string()->notNull(),
+    ]);
+    $this->createIndex('idx-event_image-event_id', '{{%event_image}}', 'event_id');
+}
+```
+
+Add a relation on the owner model for display:
+
+```php
+public function getEventImages()
+{
+    return $this->hasMany(EventImage::class, ['event_id' => 'id']);
+}
+```
+
+### Form
+
+The file input name must end with `[]`:
+
+```php
+<?php $form = ActiveForm::begin(['options' => ['enctype' => 'multipart/form-data']]); ?>
+
+<?= $form->field($model, 'images[]')->fileInput(['multiple' => true]) ?>
+
+<?php ActiveForm::end(); ?>
+```
+
+### Displaying the Gallery
+
+```php
+<?php foreach ($model->eventImages as $image): ?>
+    <?= Html::img('@web/upload/images/event/' . $image->image) ?>
+    <?= Html::img('@web/upload/images/event/thumb_' . $image->image) ?>
+<?php endforeach; ?>
+```
+
+### Update Semantics
+
+- **Update with new files** - existing image records and files (including all variants) are deleted, then the new set is inserted (related row inserts run in a transaction).
+- **Update without files** - the existing gallery is kept unchanged.
+- **Parent delete** - all related image records and their files are removed.
 
 ## Configuration Options
 
